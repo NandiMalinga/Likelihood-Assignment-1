@@ -1,0 +1,1500 @@
+---
+title: "Likelihood: Assignment 1"
+author: "Nandi Malinga"
+date: "Due: 27 March 2026"
+format: pdf
+editor: visual
+---
+
+In this report, we model extreme daily maximum wind speeds in Cape Town during the month of December, using data collected from 2014 to 2019. The data used was retrieved from the City of Cape Town's Open Data Portal. December was selected due to the prevalence of strong winds in Cape Town, making it useful for an analysis of extreme values.
+
+To model these extremes, we used a Gumbel distribution with two parameters: $\mu$, which is a location parameter, and $\sigma$ ( \> 0), which is a scale parameter. Extreme value distributions are particularly suited for modelling rare events due to their heavier tails, making this particular distribution well suited for assessing the magnitude and probability of Cape Town's high summer wind speeds.
+
+```{r libraries}
+#| include: false
+
+# LIBRARIES
+library(readxl)
+library(lubridate)
+library(tidyverse)
+library(DescTools)
+library(viridis)
+library(plotly)
+library(cmdstanr)
+library(MASS)
+library(knitr)
+```
+
+```{r create_data}
+#| include: false
+
+library(tidyverse)
+# loading data
+
+data2014 <- read_excel("C:/Users/LATITUDE 5410/OneDrive - University of Cape Town/2026/Likelihood/Wind data/Wind_2014.xlsx", skip = 2, col_names = TRUE)
+data2014 <- data2014 %>% 
+  dplyr::select(1, 7) %>% 
+   dplyr::rename("Date & Time" = 1, "Speed" = 2)
+
+data2015 <- read_excel("C:/Users/LATITUDE 5410/OneDrive - University of Cape Town/2026/Likelihood/Wind data/Wind_2015.xlsx", skip = 2, col_names = TRUE)
+data2015 <- data2015 %>% 
+   dplyr::select(1, 7) %>% 
+   dplyr::rename("Date & Time" = 1, "Speed" = 2)
+
+data2016 <- read_excel("C:/Users/LATITUDE 5410/OneDrive - University of Cape Town/2026/Likelihood/Wind data/Wind_2016.xlsx", skip = 2, col_names = TRUE)
+data2016 <- data2016 %>% 
+   dplyr::select(1, 7) %>% 
+   dplyr::rename("Date & Time" = 1, "Speed" = 2)
+
+data2017 <- read_excel("C:/Users/LATITUDE 5410/OneDrive - University of Cape Town/2026/Likelihood/Wind data/Wind_2017.xlsx", skip = 2, col_names = TRUE)
+data2017 <- data2017 %>% 
+   dplyr::select(1, 9) %>% 
+   dplyr::rename("Date & Time" = 1, "Speed" = 2)
+
+data2018 <- read_excel("C:/Users/LATITUDE 5410/OneDrive - University of Cape Town/2026/Likelihood/Wind data/Wind_2018.xlsx", skip = 2, col_names = TRUE)
+data2018 <- data2018 %>% 
+   dplyr::select(1, 9) %>% 
+   dplyr::rename("Date & Time" = 1, "Speed" = 2)
+
+data2019 <- read_excel("C:/Users/LATITUDE 5410/OneDrive - University of Cape Town/2026/Likelihood/Wind data/Wind_2019.xlsx", skip = 2, col_names = TRUE)
+data2019 <- data2019 %>% 
+   dplyr::select(1, 9) %>% 
+   dplyr::rename("Date & Time" = 1, "Speed" = 2)
+
+# combining data
+data <- bind_rows(data2014, data2015, data2016, data2017, data2018, data2019)
+
+# finding max speed for each December day
+data <- data %>%
+  mutate(`Date & Time` = dmy_hm(`Date & Time`),
+         Speed = as.numeric(Speed)) %>%
+  filter(month(`Date & Time`) == 12) %>%
+  group_by("Date" = date(`Date & Time`)) %>%
+  summarise("Max_speed" = max(Speed, na.rm = T))
+
+# removing NAs
+data$Max_speed <- data$Max_speed[!is.na(data$Max_speed)]
+
+```
+
+```{r functions}
+#| include: false
+
+## Defining functions
+
+# distribution
+g <- function(par, x) {
+  mu <- par[1]
+  sig <- par[2]
+  
+  if (sig <= 0) return(0)
+  
+  g_x <- (1/sig) * exp(-exp(-((x - mu)/sig)) - ((x - mu)/sig))
+  return(g_x)
+}
+
+# likelihood
+likelihood <- function(par, x) {
+  mu <- par[1]
+  sig <- par[2]
+  n <- length(x)
+  
+  if (sig <= 0) return(0)
+  
+  like <- 1/sig^n * exp(sum(-exp(-(x - mu)/sig) - (x - mu)/sig))
+  return(like)
+}
+
+# log likelihood
+loglike <- function(par, x) {
+  mu <- par[1]
+  sig <- par[2]
+  n <- length(x)
+  
+  if (sig <= 0) return(0)
+  
+  ll <- -n*log(sig) - sum(exp(-(x - mu)/sig)) - (sum(x) - n*mu)/sig
+  return(ll)
+}
+
+# negative log likelihood
+neg_loglike <- function(par, x) {
+  mu <- par[1]
+  sig <- par[2]
+  n <- length(x)
+  
+  if (sig <= 0) return(0)
+  
+  ll <- -n*log(sig) - sum(exp(-(x - mu)/sig)) - (sum(x) - n*mu)/sig
+  return(-ll)
+}
+
+# first derivatives
+d_sig <- function(par, x) {
+  mu <- par[1]
+  sig <- par[2]
+  n <- length(x)
+  
+  if (sig <= 0) return(0)
+  
+  d <- -(1/sig) * (n + ((x - mu)/sig)*sum(exp(-(x - mu)/sig)) + (sum(x) - n*mu)/sig)
+  return(d)
+}
+
+d_mu <- function(par, x) {
+  mu <- par[1]
+  sig <- par[2]
+  n <- length(x)
+  
+  if (sig <= 0) return(0)
+  
+  d <- -(1/sig) * (sum(exp(-(x - mu)/sig)) - n)
+  return(d)
+}
+
+# second derivative (Hessian matrix)
+hessian <- function(par, x) {
+  n <- length(x)
+  mu <- par[1]
+  sig <- par[2]
+  
+  if (sig <= 0) return(0)
+  
+  z <- (x - mu)/sig
+  exp_z <- exp(-z)
+  
+  h11 <- -(1/sig^2) * sum(exp_z)
+  
+  h12 <- -n/sig^2 + 
+    (1/sig^2)*sum(exp_z) -
+    (1/sig^2)*sum(exp_z*(x - mu)/sig)
+  
+  h22 <- (n/sig^2) - 
+    (2/sig^2)*sum((x - mu)/sig) -
+    (2/sig^3)*sum(exp_z*(x - mu)) +
+    (1/sig^4)*sum(exp_z*(x - mu)^2)
+  
+  hes <- matrix(c(h11, h12,
+                  h12, h22), 
+                nrow = 2, 
+                byrow = T)
+  return(hes)
+}
+
+# equations system
+system <- function(pars, x) {
+  mu <- pars[1]
+  sig <- pars[2]
+  
+  return(c(d_mu(c(mu,sig), x), d_sig(c(mu,sig), x)))
+}
+```
+
+# Exploratory Data Analysis
+
+Once the data was reduced to the maximum wind speed observed on each December day from 2014 to 2019, exploratory data analysis was conducted to better understand the distribution of the observations. Summary statistics were first computed to provide insight into the central tendency and spread of the data. These results are presented in Table 1.
+
+```{r}
+#| echo: false
+#| label: summary_stats
+
+x <- data$Max_speed
+x <- x[is.finite(x)]
+
+x_bar <- mean(x, na.rm = TRUE)
+x_median <- median(x, na.rm = TRUE)
+x_q1 <- quantile(x, c(0.25, 0.5, 0.75), na.rm = TRUE)[1]
+x_q3 <- quantile(x, c(0.25, 0.5, 0.75), na.rm = TRUE)[3]
+x_min <- min(x, na.rm = T)
+x_max <- max(x, na.rm = T)
+
+summary_table <- data.frame(
+  Statistic = c("Mean", "1st Quartile", "Median", "3rd Quartile", "Minimum", "Maximum"),
+  Value = round(c(x_bar, x_q1, x_median, x_q3, x_min, x_max), 2))
+
+kable(summary_table, caption = "Summary statistics for December daily maximum wind speeds (2014 - 2019)")
+```
+
+From the table above, we see that the mean daily maximum wind speed is 14.46, while the median is 7.95. This indicates positive skewness of the data. The interquartile range, from the first and third quartiles (values 5.80 and 25.60 respectively), suggests a substantial variability in the data. This is further highlighted by the large range of observed maximum speeds, from 3.30 to 36.30 m/s. These characteristics can be clearly visualised on a boxplot, show in the figure below.
+
+```{r}
+#| warning: false
+#| echo: false
+#| label: boxplot_all
+#| fig-height: 5
+#| fig-cap: "Maximum Speed Boxplot"
+
+## Boxplot for all data
+box_alldata <- data %>% 
+  filter(is.finite(Max_speed))
+
+boxplot(data$Max_speed,
+        ylab = "Max Speed",
+        main = "Boxplot of Max Speed distribution")
+```
+
+The boxplot reveals a wide spread in the data, as well as substantial positive skewness. This indicates the presence of larger observations in the upper tail, which could correspond to the extreme wind events. These characteristics suggest that the data may behave in a way consistent with extreme events (heavier tails) and therefore not come from a symmetric distribution.
+
+To further examine the distribution characteristics and assess the extent of extreme values, a histogram of the data is constructed. This provides a more in-depth view of the overall distribution, to justify the selection of the Gumbel distribution model.
+
+```{r}
+#| echo: false
+#| label: histogram_all
+#| fig-cap: "Maximum Speed Histogram"
+
+hist(data$Max_speed, breaks = 30, probability = TRUE, main = "Distribution of maximum speed", xlab = "max speed")
+```
+
+The histogram of the maximum wind speeds (Figure 1) reveals a clear bimodal distribution, with one cluster concentrated at lower speeds (approximately 5 to 10 m/s) and another at substantially higher values (25 - 35 m/s). This distinct separation suggests that the dataset is not homogeneous and may consist of observations generated under different conditions.
+
+To investigate this further, yearly boxplots (Figure 3) were examined. These plots reveal that observations from 2017 and earlier fall within the lower cluster, while values from 2018 and 2019 shift to higher wind speeds. Both the boxplots and corresponding time series plots (Figure 4) indicate that this change is abrupt, with the entire distribution shifting upwards from 2018 onward.
+
+```{r}
+#| echo: false
+#| label: boxplot_years
+#| fig-cap: "Boxplot of Max Speed for each year (2014 - 2019)"
+
+## Boxplot per year
+box_yeardata <- data %>% 
+  filter(is.finite(Max_speed)) %>% 
+  mutate(Year = year(Date))
+
+boxplot(Max_speed ~ Year, data = box_yeardata,
+        xlab = "Year",
+        ylab = "Max Speed",
+        main = "Max Speed per Year")
+```
+
+```{r}
+#| echo: false
+#| label: plot_all
+#| fig-cap: "Time series plot of maximum speeds"
+
+## Plot of December values per year
+
+year_begin <- as.Date(c("2014-01-01","2015-01-01", "2016-01-01", "2017-01-01","2018-01-01","2019-01-01"))
+
+plot(data$Date, data$Max_speed,
+     type = "b",
+     xlab = "Year",
+     ylab = "Max speed",
+     main = "Change in max speed over time")
+abline(v = year_begin, col = "darkgrey", lty = 2)
+
+```
+
+If this discontinuity were driven by environmental or climatic factors, a gradual increase in wind speeds over time would be expected. Instead, the sudden shift suggests the influence of an external factor, such as a change in measurement tools. To prevent modelling this change, we the dataset is split into two periods: observations before January-2018 (pre-2018), and those from 2018 and onwards (post-2018).
+
+By separating the data in this way, we account for the apparent change in measurement behaviour and avoid fitting a single model to heterogeneous data. For the remainder of the analysis, separate Gumbel distribution models are fitted to each subset. This allows for more appropriate modelling of extreme wind speeds within each period and provides more reliable inference for rare wind events.
+
+Extreme value distributions are designed to model the largest (or smallest) observations within a set of independent measurements. In this case, the focus is on modelling unusually large wind speeds, which correspond to rare but potentially impactful extreme wind events.
+
+```{r}
+#| echo: false
+#| label: hist_split
+#| fig-cap: "Histogram of maximum speeds on split data"
+
+# splitting data
+pre2018 <- data$Max_speed[data$Date < as.Date("2018-01-01")]
+pre2018 <- pre2018[is.finite(pre2018)]
+
+post2018 <- data$Max_speed[data$Date >= as.Date("2018-01-01")]
+post2018 <- post2018[is.finite(post2018)]
+
+par(mfrow = c(1, 2))
+# pre2018 histogram
+hist(pre2018, prob = TRUE, breaks = 30, main = "Distribution of Pre2018", xlab = "max speed")
+curve(dGumbel(x, loc = 5, scale = 1), col = "hotpink", add = TRUE, lwd = 2)
+# use initial values mu0 = 5, sig0 = 1
+
+# post2018 histogram
+hist(post2018, prob = TRUE, breaks = 30, main = "Distribution of Post2018", xlab = "max speed")
+curve(dGumbel(x, loc = 30, scale = 3.5), col = "navy", add = TRUE, lwd = 2)
+# use initial values mu0 = 30, sig0 = 3.5
+```
+
+Above, we overlay a Gumbel distribution to histograms of each dataset (which we found by changing values of $\mu$ and $\sigma$, and using a roughly fitting selected parameter values to determine the initial values for our optimisation). Using the $\texttt{optim}$ function, we find the following MLEs for mu and sigma, as well as their estimated correlation derived from the output Hessian matrix. These are summarised in the following table.
+
+```{r}
+#| echo: false
+#| label: mles
+
+# pre-2018
+mu0_pre <- mean(pre2018, na.rm = T)
+sig0_pre <- sd(pre2018, na.rm = T)
+
+par0_pre <- c(mu0_pre, sig0_pre)
+hes0_pre <- hessian(par0_pre, pre2018)
+
+mle_pre <- optim(par = par0_pre, fn = neg_loglike, x = pre2018, hessian = TRUE) # minimum of negative ll
+
+mu_mle_pre <- mle_pre$par[1]
+sig_mle_pre <- mle_pre$par[2]
+
+# correlation of parameters
+cov_pre <- solve(mle_pre$hessian)
+corr_pre <- cov_pre[1, 2]/(sqrt(cov_pre[1, 1])*sqrt(cov_pre[2, 2]))
+
+
+# post-2018 (mean and sd as initial values, extract mles)
+mu0_post <- mean(post2018, na.rm = T)
+sig0_post <- sd(post2018, na.rm = T)
+
+par0_post <- c(mu0_post, sig0_post)
+hes0_post <- hessian(par0_post, post2018)
+
+mle_post <- optim(par = par0_post, fn = neg_loglike, x = post2018, hessian = TRUE)
+
+# correlation of parameters
+cov_post <- solve(mle_post$hessian)
+corr_post <- cov_post[1, 2]/(sqrt(cov_post[1, 1])*sqrt(cov_post[2, 2]))
+
+# table of results
+mles <- data.frame(Parameter = c("μ", "σ", "cor"),
+                   Pre2018 = round(c(mle_pre$par, corr_pre),2),
+                   Post2018 = round(c(mle_post$par, corr_post), 2))
+
+mle_table <- kable(mles, caption = "Pre2018 and Post2018 MLE parameters")
+mle_table
+```
+
+## Likelihood surfaces
+
+We construct likelihood surfaces, overlaid with contour plots, to visualise how the log-likelihood varies over the parameter space ($\mu$, $\sigma$). The highest point of each surface corresponds to the parameter combination that results in the highest log-likelihood, which we use to identify the maximum likelihood estimates (MLEs) for each dataset, as expected. The MLEs calculated above are indicated on their respective plots.
+
+```{r}
+#| echo: false
+#| label: likesurf_contplots
+#| fig-cap: "Likelihood surfaces (overlayed contours) for split data"
+
+par(mfrow = c(1, 2))
+
+# left: pre2018 (centre around mles)
+mu_mle_pre <- mle_pre$par[1]
+sig_mle_pre <- mle_pre$par[2]
+
+mu_pre <- seq(mu_mle_pre - 0.3, mu_mle_pre + 0.3, length.out = 100)
+sig_pre <- seq(sig_mle_pre - 0.1, sig_mle_pre + 0.1, length.out = 100)
+
+grid_pre <- expand.grid(mu_pre, sig_pre)
+
+z_pre <- matrix(
+  apply(grid_pre, 1, function(row) loglike(c(row[1], row[2]), pre2018)),
+  nrow = length(mu_pre),
+  ncol = length(sig_pre)
+)
+dim(z_pre) <- c(100, 100)
+
+image(mu_pre, sig_pre, z_pre, 
+        xlab = expression(mu), 
+        ylab = expression(sigma),
+        main = "Pre2018",
+        col = cm.colors(100))
+
+contour(mu_pre, sig_pre, z_pre, 
+        add = TRUE,
+        nlevels = 15,
+        col = "black")
+
+points(mu_mle_pre, sig_mle_pre, col = "black", pch = 19)
+text(mu_mle_pre, sig_mle_pre, labels = "MLE", pos = 3, col = "black")
+
+
+# right: post2018
+mu_mle_post <- mle_post$par[1]
+sig_mle_post <- mle_post$par[2]
+
+mu_post <- seq(mu_mle_post - 0.2, mu_mle_post + 0.2, length.out = 100)
+sig_post <- seq(sig_mle_post - 0.1, sig_mle_post + 0.1, length.out = 100)
+
+grid_post <- expand.grid(mu_post, sig_post)
+
+z_post <- matrix(
+  apply(grid_post, 1, function(row) loglike(c(row[1], row[2]), post2018)),
+  nrow = length(mu_post),
+  ncol = length(sig_post)
+)
+dim(z_post) <- c(100, 100)
+
+image(mu_post, sig_post, z_post, 
+        xlab = expression(mu), 
+        ylab = expression(sigma),
+        main = "Post2018",
+        col = cm.colors(100))
+
+contour(mu_post, sig_post, z_post, 
+        add = TRUE,
+        nlevels = 15,
+        col = "black")
+
+points(mu_mle_post, sig_mle_post, col = "black", pch = 19)
+text(mu_mle_post, sig_mle_post, labels = "MLE", pos = 3, col = "black")
+
+```
+
+The contour plots show slightly elliptical shapes tilted on a positive diagonal, indicating a slightly positive correlation between $\mu$ and $\sigma$ in both periods ($\rho ≈ 0.33$) between parameters are evident by the direction and shape of the contours in the respective plots.
+
+On a three-dimensional plot, we illustrate the joint parameter space of $\mu$ and $\sigma$, with the log-likelihood shown on the vertical axis (Figure 7). The likelihood surface exhibits the shape of a smooth hill with a single peak, indicating that the log-likelihood around the maximum can be well approximated by a quadratic function. The well-defined peak confirms the presence of a single maximum within the specified parameter range, corresponding to the MLE. Under this quadratic approximation, the MLEs are approximately normally distributed. This means that we can construct Wald confidence intervals.
+
+```{r}
+#| echo: false
+#| fig-cap: "3D Likelihood Surfaces for both datasets"
+
+par(mfrow = c(1, 2)) 
+
+# pre2018
+persp(mu_pre, sig_pre, z_pre,
+      theta = 0, phi = 30,
+      expand = 0.5,          # Scale factor
+      col = "hotpink", 
+      border = NA,
+      shade = 0.5,
+      xlab = expression(mu),
+      ylab = expression(sigma),
+      zlab = "Log-likelihood",
+      main = "Pre2018")
+
+
+# Post2018
+persp(mu_post, sig_post, z_post,
+      theta = 0, phi = 30,
+      expand = 0.5,
+      col = "deepskyblue",
+      border = NA,
+      shade = 0.5,
+      xlab = expression(mu),
+      ylab = expression(sigma),
+      zlab = "Log-likelihood",
+      main = "Post2018")
+
+```
+
+## Wald confidence intervals
+
+```{r}
+#| include: false
+#| label: wald_pre
+
+### Pre2018 data
+mpre_mle <- mle_pre$par[1]
+spre_mle <- mle_pre$par[2]
+
+se_pre <- sqrt(diag(cov_pre))
+se_mu1 <- se_pre[1]
+se_sig1 <- se_pre[2]
+
+# Wald confidence interval
+z_95 <- qnorm(0.975)
+
+WaldCI_mu1 <- c(mpre_mle - z_95*se_mu1, mpre_mle + z_95*se_mu1)
+WaldCI_mu1
+
+WaldCI_sig1 <- c(spre_mle - z_95*se_sig1, spre_mle + z_95*se_sig1)
+WaldCI_sig1
+
+```
+
+```{r}
+#| include: false
+#| label: wald_post
+
+### Post2018 data
+mpost_mle <- mle_post$par[1]
+spost_mle <- mle_post$par[2]
+
+se_post <- sqrt(diag(cov_post))
+se_mu2 <- se_post[1]
+se_sig2 <- se_post[2]
+
+# Wald confidence interval (95%)
+WaldCI_mu2 <- c(mpost_mle - z_95*se_mu2, mpost_mle + z_95*se_mu2)
+WaldCI_mu2
+
+WaldCI_sig2 <- c(spost_mle - z_95*se_sig2, spost_mle + z_95*se_sig2)
+WaldCI_sig2
+```
+
+Using the formula $(\mu, \sigma) +/- z_{\alpha/2} * SE(\mu, \sigma)$, we construct the following Wald Confidence intervals for the Pre2018 and Post2018 datasets:
+
+```{r}
+#| echo: false
+wald_table <- data.frame(Parameter = c("μ", "σ"),
+                         Pre2018 = c(paste0("(", round(WaldCI_mu1[1], 2), ", ", round(WaldCI_mu1[2], 2), ")"),
+                                     paste0("(", round(WaldCI_sig1[1], 3), ", ", round(WaldCI_sig1[2], 2), ")")),
+                         Post2018 = c(paste0("(", round(WaldCI_mu2[1], 2), ", ", round(WaldCI_mu2[2], 2), ")"),
+                                     paste0("(", round(WaldCI_sig2[1], 2), ", ", round(WaldCI_sig2[2], 2), ")"))
+)
+
+kable(wald_table, caption = "95% Wald Confidence Intervals")
+```
+
+## Profile likelihoods
+
+Profile likelihoods are used to investigate how likelihood changes as one parameter changes. This is achieved by fixing the parameter of interest at a range of values and, for each value, maximising the likelihood with respect to the other parameter (since the Gumbel distribution only has two). This produces a two-dimensional curve representing the maximum possible likelihood for each value of the parameter of interest.
+
+For the $\mu$ profile likelihoods of both data subsets, we construct a sequence of $\mu$ values (centred around the corresponding MLE). For each fixed $\mu$, we apply the \texttt{optim} function to determine the value of $\sigma$ that maximises the log likelihood, and the resulting log likelihood is recorded. A similar process is followed to construct the profile likelihoods for $\sigma$, where $\sigma$ is fixed and the optimal value of $\mu$ is obtained.
+
+The resulting plots illustrate the profile likelihood curves for each parameter, as well as the associated profile confidence intervals and Wald confidence intervals calculated previously. These plots allow for comparison between the two interval estimation methods, providing insight into uncertainty surrounding the parameter estimates.
+
+```{r}
+#| include: false
+#| label: mu_profile1
+
+### mu profile (pre)
+
+mu_vals1 <- seq(mpre_mle - 2, mpre_mle + 2, length = 100)
+
+pl_mu1 <- sapply(mu_vals1, function(m) {
+  optimal <- optim(par = spre_mle, 
+               fn = function(s) neg_loglike(c(m, s), pre2018),
+               method = "Brent",
+               lower = 0.01, upper = 10)
+  -optimal$value  # return log-likelihood
+})
+```
+
+```{r}
+#| include: false
+#| label: sig_profile1
+
+# profile likelihood for sigma
+sig_vals1 <- seq(0.1, 10, length.out = 100)
+
+pl_sig1 <- sapply(sig_vals1, function(s) {
+  optimal <- optim(par = mpre_mle,
+               fn = function(m) neg_loglike(c(m, s), pre2018),
+               method = "Brent",
+               lower = 0, upper = 20)
+  -optimal$value
+})
+```
+
+```{r}
+#| include: false
+#| label: mu_profile2
+
+mu_vals2 <- seq(mpost_mle - 2, mpost_mle + 2, length = 100)
+
+pl_mu2 <- sapply(mu_vals2, function(m) {
+  optimal <- optim(par = spost_mle, 
+               fn = function(s) neg_loglike(c(m, s), post2018),
+               method = "Brent",
+               lower = 0.01, upper = 10)
+  -optimal$value  # return log-likelihood
+})
+```
+
+```{r}
+#| include: false
+#| label: sig_profile2
+
+# profile likelihood for sigma
+sig_vals2 <- seq(0.1, 10, length.out = 100)
+
+pl_sig2 <- sapply(sig_vals2, function(s) {
+  optimal <- optim(par = mpost_mle,
+               fn = function(m) neg_loglike(c(m, s), post2018),
+               method = "Brent",
+               lower = 10, upper = 40)
+  -optimal$value
+})
+```
+
+### Pre2018
+
+```{r}
+#| echo: false
+#| fig-cap: "Profile likelihoods for Pre2018 data"
+threshold <- -qchisq(0.95, df = 1)/2
+
+par(mfrow = c(1, 2))
+
+# left panel: mu profile
+
+# normalise
+pl_mu1_norm <- pl_mu1 - max(pl_mu1, na.rm = TRUE)
+
+# profile CI bounds
+left_mu1 <- approx(x = pl_mu1_norm[mu_vals1 < mu_mle_pre],
+                   y = mu_vals1[mu_vals1 < mu_mle_pre],
+                   xout = threshold)$y
+right_mu1 <- approx(x = pl_mu1_norm[mu_vals1 > mu_mle_pre],
+                    y = mu_vals1[mu_vals1 > mu_mle_pre],
+                    xout = threshold)$y
+
+# PLOT
+plot(mu_vals1, pl_mu1 - max(pl_mu1, na.rm = T), type = "l",
+     xlab = expression(mu), 
+     ylab = "log-likelihood",
+     main = "Profile: μ")
+
+# threshold horizontal
+abline(h = threshold, col = "red", lty = 2)
+
+# profile CI bounds
+abline(v = left_mu1, col = "red", lty = 2)
+abline(v = right_mu1, col = "red", lty = 2)
+
+# MLE
+abline(v = mu_mle_pre, col = "hotpink", lty = 1)
+
+# Wald verticals
+abline(v = WaldCI_mu1, col = "purple", lty = 3)
+
+# key
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "hotpink", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+
+# right panel: sigma profile
+
+# normalise
+pl_sig1_norm <- pl_sig1 - max(pl_sig1)
+
+# profile CI bounds
+left1 <- approx(x = pl_sig1_norm[sig_vals1 < sig_mle_pre],
+                y = sig_vals1[sig_vals1 < sig_mle_pre],
+                xout = threshold)$y
+right1 <- approx(x = pl_sig1_norm[sig_vals1 > sig_mle_pre],
+                 y = sig_vals1[sig_vals1 > sig_mle_pre],
+                 xout = threshold)$y
+
+plot(sig_vals1, pl_sig1_norm, type = "l",
+     xlab = expression(sigma), 
+     ylab = "log-likelihood",
+     main = "Profile: σ",
+     xlim = c(sig_mle_pre - 2, sig_mle_pre + 2),
+     ylim = c(-10, 0))
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# profile CI bounds
+abline(v = left1, col = "red", lty = 2)
+abline(v = right1, col = "red", lty = 2)
+
+# MLE
+abline(v = sig_mle_pre, col = "hotpink", lty = 1)
+
+# Wald
+abline(v = WaldCI_sig1, col = "purple", lty = 3)
+
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "hotpink", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+# Values summary
+# cat("Pre 2018 sigma profile CI:", left1, "-", right1, "\n")
+
+```
+
+From the plots above, we observe that the profile likelihood and Wald confidence intervals for the Pre2018 parameters are very similar, indicating that the normality assumption of the Wald intervals is reasonable. In other words, the log-likelihood surface surrounding the MLE is indeed approximately symmetric. The difference between the two interval types is slightly larger for $\sigma$, suggesting that the normal/quadratic approximation is less accurate than $\mu$, and more uncertainty in its estimate.
+
+### Post2018
+
+```{r}
+#| echo: false
+#| fig-cap: "Profile likelihoods for Post2018 data"
+
+par(mfrow = c(1, 2))
+
+# left panel: mu profile
+
+# normalise
+pl_mu2_norm <- pl_mu2 - max(pl_mu2, na.rm = TRUE)
+
+# profile CI bounds
+left_mu2 <- approx(x = pl_mu2_norm[mu_vals2 < mu_mle_post],
+                   y = mu_vals2[mu_vals2 < mu_mle_post],
+                   xout = threshold)$y
+right_mu2 <- approx(x = pl_mu2_norm[mu_vals2 > mu_mle_post],
+                    y = mu_vals2[mu_vals2 > mu_mle_post],
+                    xout = threshold)$y
+
+plot(mu_vals2, pl_mu2 - max(pl_mu2, na.rm = T), 
+     type = "l",
+     xlab = expression(mu), 
+     ylab = "log-likelihood",
+     main = "Profile: μ")
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# CI bounds
+abline(v = c(left_mu2, right_mu2), col = "red", lty = 2)
+
+# MLE
+abline(v = mu_mle_post, col = "navyblue", lty = 1)
+
+# Wald
+abline(v = WaldCI_mu2, col = "purple", lty = 3)
+
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "navyblue", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+
+# right panel: sigma profile
+
+# normalise
+pl_sig2_norm <- pl_sig2 - max(pl_sig2)
+
+# profile CI bounds
+left2 <- approx(x = pl_sig2_norm[sig_vals2 < spost_mle],
+                y = sig_vals2[sig_vals2 < spost_mle],
+                xout = threshold)$y
+right2 <- approx(x = pl_sig2_norm[sig_vals2 > spost_mle],
+                 y = sig_vals2[sig_vals2 > spost_mle],
+                 xout = threshold)$y
+
+plot(sig_vals2, pl_sig2_norm, type = "l",
+     xlab = expression(sigma), 
+     ylab = "log-likelihood",
+     main = "Profile: σ",
+     xlim = c(spost_mle - 2, spost_mle + 2),
+     ylim = c(-10, 0))
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# CI bounds
+abline(v = c(left2, right2), col = "red", lty = 2)
+
+# MLE
+abline(v = spost_mle, col = "navyblue", lty = 1)
+
+# Wald
+abline(v = WaldCI_sig2, col = "purple", lty = 3)
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "navyblue", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+par(mfrow = c(1, 1))
+
+# Values summary
+# cat("Post 2018 sigma profile CI:", left2, "-", right2, "\n")
+
+```
+
+Similar patterns are observed for the Post2018 dataset. However, the discrepancy between the profile likelihoods and Wald confidence intervals is larger than in the Pre2018 dataset. This suggests greater uncertainty in th estimate of $\sigma$, and indicates that the normal approximation of the Wald intervals is less accurate.
+
+# Reparameterisation
+
+Reparameterisation is useful as it improves interpretability, can achieve greater independence between parameters (and potentially more accurate estimates), and to make the log-likelihood more quadratic. From Table 2 in Bolivar et al. (2010), the likelihood of the Gumbel distribution can be reparameterised in terms of its quantiles. More specifically, the quantile for probability $\alpha$ can be expressed as
+
+$$Q_{\alpha} = \mu - \sigma*log(-log(\alpha))$$ For this reparameterisation, we define a new function `nll_repar` which evaluates the negative log-likelihood in terms of $Q_{\alpha}$ and $\sigma$. Using the quantile formula above, the function converts $Q_{\alpha}$ to $\mu$, and uses $\mu$ and $\sigma$ to compute the negative log likelihood through our original function `neg_loglike`. To enforce the constraint $\sigma$ \> 0, the function returns a large penalty value if this condition is not satisfied.
+
+```{r}
+#| include: false
+#| label: repar_functions
+
+# negative log likelihood
+nll_repar <- function(par, x, alpha) {
+  Q_alpha <- par[1]
+  sig     <- par[2]
+  
+  if (sig <= 0) return(1e10)
+  
+  
+  mu  <- Q_alpha + sig * log(-log(alpha))
+  nll <- neg_loglike(c(mu, sig), x)
+  if (!is.finite(nll)) return(1e10)
+  return(nll)
+}
+
+
+wald_CI <- function(est_Q, g, cov_mat, z) {
+  se <- sqrt(as.numeric(t(g) %*% cov_mat %*% g))
+  c(lower = est_Q - z * se,
+    upper = est_Q + z * se)
+}
+
+profile_quantile <- function(q_vals, sig0, data, alpha) {
+  sapply(q_vals, function(q_fixed) {
+    result <- tryCatch(
+      optim(par = sig0, fn = function(sig) nll_repar(c(q_fixed, sig), data, alpha),
+        method  = "Brent",
+        lower   = 0.01,
+        upper   = 20),
+      error = function(e) list(convergence = 1, value = NA)
+    )
+    if (result$convergence == 0) {
+      -result$value 
+    } else {
+      NA }
+  })
+}
+
+profile_CI <- function(x_vals, y_vals, threshold_val) {
+  valid_idx <- which(!is.na(y_vals))
+  if (length(valid_idx) < 2) return(c(NA, NA))
+  x_vals <- x_vals[valid_idx]
+  y_vals <- y_vals[valid_idx]
+  crossings <- which(diff(y_vals >= threshold_val) != 0)
+  if (length(crossings) >= 2) {
+    lower_idx <- crossings[1]
+    lower_x   <- approx(y_vals[lower_idx:(lower_idx + 1)],
+                        x_vals[lower_idx:(lower_idx + 1)],
+                        xout = threshold_val)$y
+    upper_idx <- crossings[length(crossings)]
+    upper_x   <- approx(y_vals[upper_idx:(upper_idx + 1)],
+                        x_vals[upper_idx:(upper_idx + 1)],
+                        xout = threshold_val)$y
+    return(c(lower_x, upper_x))
+  }
+  return(c(NA, NA))
+}
+```
+
+```{r}
+#| include: false
+#| label: repar_usedvalues
+
+k <- (log(-log(0.5)) - log(-log(0.9)))
+
+# gradients
+g_90 <- c(1, 0) # (grad wrt Q90, grad wrt sigma)
+g_95 <- c(1, log(-log(0.90)) -log(-log(0.95)))
+g_99 <- c(1, log(-log(0.90)) -log(-log(0.99)))
+
+# z-values
+z_90 <- qnorm(0.95)
+z_95 <- qnorm(0.975)
+z_99 <- qnorm(0.995)
+
+# threshold
+threshold <- -qchisq(0.95, df = 1) / 2
+
+```
+
+```{r}
+#| include: false
+#| label: quantileanalysys_pre 
+
+Q90_pre <- quantile(pre2018, 0.9)
+par_rep_pre <- c(Q90_pre, sig_mle_pre)
+
+reparam_pre <- optim(par = par_rep_pre, fn = nll_repar, x = pre2018, alpha = 0.90, hessian = TRUE)
+
+Q_alpha_pre <- reparam_pre$par[1]
+sig_rep_pre <- reparam_pre$par[2]
+
+# Calculate mu
+mu_rep_pre <- Q_alpha_pre + sig_rep_pre * log(-log(0.9))
+
+# Estimate quantiles for pre2018
+est_Q90_pre <- Q_alpha_pre
+est_Q95_pre <- mu_rep_pre - sig_rep_pre * log(-log(0.95))
+est_Q99_pre <- mu_rep_pre - sig_rep_pre * log(-log(0.99))
+
+# Standard errors for pre2018
+cov_rep_pre <- solve(reparam_pre$hessian)
+se_mrep_pre <- sqrt(cov_rep_pre[1, 1])
+se_srep_pre <- sqrt(cov_rep_pre[2, 2])
+
+# Wald confidence intervals
+Wald_CI90_pre <- wald_CI(est_Q90_pre, g_90, cov_rep_pre, z_90)
+Wald_CI95_pre <- wald_CI(est_Q95_pre, g_95, cov_rep_pre, z_95)
+Wald_CI99_pre <- wald_CI(est_Q99_pre, g_99, cov_rep_pre, z_99)
+
+```
+
+```{r}
+#| include: false
+#| label: quantileanalysis_post
+
+# initial values
+Q90_post <- quantile(post2018, 0.9)
+par_rep_post <- c(Q90_post, sig_mle_post)
+
+# optimizing
+reparam_post <- optim(par = par_rep_post, fn = nll_repar, x = post2018, alpha = 0.90, hessian = TRUE)
+
+# Quantile MLEs
+Q_alpha_post <- reparam_post$par[1]
+sig_rep_post <- reparam_post$par[2]
+
+# Calculate mu
+mu_rep_post  <- Q_alpha_post + sig_rep_post * log(-log(0.90))
+
+# Estimate quantiles for post2018
+est_Q90_post <- Q_alpha_post
+est_Q95_post <- mu_rep_post - sig_rep_post * log(-log(0.95))
+est_Q99_post <- mu_rep_post - sig_rep_post * log(-log(0.99))
+
+# standard errors
+cov_rep_post <- solve(reparam_post$hessian)
+se_mrep_post <- sqrt(cov_rep_post[1, 1])
+se_srep_post <- sqrt(cov_rep_post[2, 2])
+
+# Wald confidence intervals
+Wald_CI90_post <- wald_CI(est_Q90_post, g_90, cov_rep_post, z_90)
+Wald_CI95_post <- wald_CI(est_Q95_post, g_95, cov_rep_post, z_95)
+Wald_CI99_post <- wald_CI(est_Q99_post, g_99, cov_rep_post, z_99)
+
+
+# ## Q90
+# se_Q90_post <- sqrt(t(g_90) %*% cov_rep_post %*% g_90)
+# Wald_CI90_post <- c(est_Q90_post - z_90 * se_Q90_post, est_Q90_post + z_90 * se_Q90_post)
+# 
+# ## Q95
+# se_Q95_post <- sqrt(t(g_95) %*% cov_rep_post %*% g_95)
+# Wald_CI95_post <- c(est_Q95_post - z_95 * se_Q95_post, est_Q95_post + z_95 * se_Q95_post)
+# 
+# ## Q99
+# se_Q99_post <- sqrt(t(g_99) %*% cov_rep_post %*% g_99)
+# Wald_CI99_post <- c(est_Q99_post - z_99 * se_Q99_post, est_Q99_post + z_99 * se_Q99_post)
+
+```
+
+For each of the datasets, we use starting values $Q_{0.9}$ and $\sigma$ to perform reparameterised optimisation using the $\texttt{optim}$ function. With the optimal values, we use the quantile formula to find the value of $\mu$. We can now estimate values for $Q_{0.9}$, $Q_{0.95}$ and $Q_{0.99}$. Also from the results of the $\texttt{optim}$ function, we can obtain the covariance matrix. Using our defined `wald_CI` formula, which requires the estimated $Q_{\alpha}$, covariance matrix, gradients, and $z_{\alpha}$ (from the normal distribution), we calculate the Wald confidence intervals of each specified quantile. These can be summarised below:
+
+```{r}
+#| echo: false
+#| label: repwald_pre
+
+library(knitr)
+wald_rep_pre <- data.frame(
+  Quantile = c("Q90", "Q95", "Q99"),
+  Estimate = round(c(est_Q90_pre, est_Q95_pre, est_Q99_pre), 2),
+  Lower = round(c(Wald_CI90_pre[1], Wald_CI95_pre[1], Wald_CI99_pre[1]), 2),
+  Upper = round(c(Wald_CI90_pre[2], Wald_CI95_pre[2], Wald_CI99_pre[2]), 2)
+)
+
+kable(wald_rep_pre,
+      col.names = c("Quantile", "Estimate", "Lower", "Upper"),
+      caption = "Pre2018 - Wald Confidence Intervals")
+```
+
+```{r}
+#| echo: false
+#| label: repwald_post
+
+library(knitr)
+wald_rep_post <- data.frame(
+  Quantile = c("Q90", "Q95", "Q99"),
+  Estimate = round(c(est_Q90_post, est_Q95_post, est_Q99_post), 2),
+  Lower = round(c(Wald_CI90_post[1], Wald_CI95_post[1], Wald_CI99_post[1]), 2),
+  Upper = round(c(Wald_CI90_post[2], Wald_CI95_post[2], Wald_CI99_post[2]), 2)
+)
+
+kable(wald_rep_post,
+      col.names = c("Quantile", "Estimate", "Lower", "Upper"),
+      caption = "Post2018 - Wald Confidence Intervals")
+```
+
+We also obtain the profile likelihoods for each specified quantile by applying the created function `profile_quantile`, which finds the greatest likelihood of a fixed $Q_{\alpha}$ by optimising over $\sigma$. The following plots show the resulting plots for each dataset:
+
+```{r}
+#| echo: false
+#| fig-cap: "Quantile profile likelihoods for Pre2018"
+
+## profile likelihoods
+Q90_vals_pre <- seq(est_Q90_pre - 2, est_Q90_pre + 2, length.out = 500)
+Q95_vals_pre <- seq(est_Q95_pre - 2, est_Q95_pre + 2, length.out = 500)
+Q99_vals_pre <- seq(est_Q99_pre - 2, est_Q99_pre + 2, length.out = 500)
+
+pl_Q90_pre <- profile_quantile(Q90_vals_pre, sig_rep_pre, pre2018, 0.90)
+pl_Q95_pre <- profile_quantile(Q95_vals_pre, sig_rep_pre, pre2018, 0.95)
+pl_Q99_pre <- profile_quantile(Q99_vals_pre, sig_rep_pre, pre2018, 0.99)
+
+# normalised
+pl_Q90_norm_pre <- pl_Q90_pre - max(pl_Q90_pre, na.rm = TRUE)
+pl_Q95_norm_pre <- pl_Q95_pre - max(pl_Q95_pre, na.rm = TRUE)
+pl_Q99_norm_pre <- pl_Q99_pre - max(pl_Q99_pre, na.rm = TRUE)
+
+# CI bounds:
+upper_Q90_pre <- Q90_vals_pre[pl_Q90_norm_pre >= threshold]
+profile_CI_Q90_pre <- c(lower = min(upper_Q90_pre, na.rm = TRUE), 
+                        upper = max(upper_Q90_pre, na.rm = TRUE))
+
+## Q95
+upper_Q95_pre <- Q95_vals_pre[pl_Q95_norm_pre >= threshold]
+profile_CI_Q95_pre <- c(lower = min(upper_Q95_pre, na.rm = TRUE), 
+                        upper = max(upper_Q95_pre, na.rm = TRUE))
+
+## Q99
+upper_Q99_pre <- Q99_vals_pre[pl_Q99_norm_pre >= threshold]
+profile_CI_Q99_pre <- c(lower = min(upper_Q99_pre, na.rm = TRUE), 
+                        upper = max(upper_Q99_pre, na.rm = TRUE))
+
+# PLOTS
+par(mfrow = c(1, 3))
+
+## Q90
+plot(Q90_vals_pre, pl_Q90_norm_pre, type = "l",
+     xlab = expression(Q[0.90]),
+     ylab = "log-likelihood",
+     ylim = c(min(pl_Q90_norm_pre, threshold - 0.5, na.rm = TRUE),
+              max(pl_Q90_norm_pre, na.rm = TRUE) + 0.5),
+     panel.first = grid())
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# CI bounds
+if (!any(is.na(profile_CI_Q90_pre))) {
+  abline(v = profile_CI_Q90_pre, col = "red", lty = 2)
+}
+
+# MLE
+abline(v = est_Q90_pre, col = "hotpink", lty = 1)
+
+# Wald
+abline(v = Wald_CI90_pre, col = "purple", lty = 3)
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "hotpink", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+
+# Q95
+plot(Q95_vals_pre, pl_Q95_norm_pre, type = "l",
+     xlab = expression(Q[0.95]),
+     ylab = "log-likelihood",
+     ylim = c(min(pl_Q95_norm_pre, threshold - 0.5, na.rm = TRUE),
+              max(pl_Q95_norm_pre, na.rm = TRUE) + 0.5),
+     panel.first = grid())
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# CI bounds
+if (!any(is.na(profile_CI_Q95_pre))) {
+  abline(v = profile_CI_Q95_pre, col = "red", lty = 2)
+}
+
+# MLE
+abline(v = est_Q95_pre, col = "hotpink", lty = 1)
+
+# Wald
+abline(v = Wald_CI95_pre, col = "purple", lty = 3)
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "hotpink", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+
+plot(Q99_vals_pre, pl_Q99_norm_pre, type = "l",
+     xlab = expression(Q[0.99]),
+     ylab = "log-likelihood",
+     ylim = c(min(pl_Q99_norm_pre, threshold - 0.5, na.rm = TRUE),
+              max(pl_Q99_norm_pre, na.rm = TRUE) + 0.5),
+     panel.first = grid())
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# CI bounds
+if (!any(is.na(profile_CI_Q99_pre))) {
+  abline(v = profile_CI_Q99_pre, col = "red", lty = 2)
+}
+
+# MLE
+abline(v = est_Q99_pre, col = "hotpink", lty = 1)
+
+# Wald
+abline(v = Wald_CI99_pre, col = "purple", lty = 3)
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "hotpink", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+```
+
+From the profile likelihoods, we observe some disparity between teh profile likelihood intervals and the Wald confidence intervals for the Pre2018 data. For $Q_{0.9}$, the profile likelihood interval is slightly wider than the Wald interval, suggesting that the true uncertainty may be larger than what is implied by the normal approximation of Wald's method. This also indicates some asymmetry in the likelihood around the estimate. For $Q_{0.95}$, the Wald and profile likelihood intervals are very similar, suggesting that the likelihood surrounding this quantile is approximately quadratic, making Wald's normal approximation reasonable. Finally, for $Q_{0.99}$, there is a substantial difference between the two interval types, with the Wald interval noticeably wider than the profile likelihood interval. This suggests that the normal approximation is conservative here, leading to an overestimation of the uncertainty associated with the parameter estimate.
+
+```{r}
+#| echo: false
+#| fig-cap: "Quantile profile likelihoods for Post2018"
+
+# profile likelihoods
+Q90_vals_post <- seq(est_Q90_post - 4, est_Q90_post + 4, length.out = 100)
+Q95_vals_post <- seq(est_Q95_post - 4, est_Q95_post + 4, length.out = 100)
+Q99_vals_post <- seq(est_Q99_post - 6, est_Q99_post + 6, length.out = 100)
+
+pl_Q90_post <- profile_quantile(Q90_vals_post, sig_rep_post, post2018, 0.90)
+pl_Q95_post <- profile_quantile(Q95_vals_post, sig_rep_post, post2018, 0.95)
+pl_Q99_post <- profile_quantile(Q99_vals_post, sig_rep_post, post2018, 0.99)
+
+# normalised
+pl_Q90_norm_post <- pl_Q90_post - max(pl_Q90_post, na.rm = TRUE)
+pl_Q95_norm_post <- pl_Q95_post - max(pl_Q95_post, na.rm = TRUE)
+pl_Q99_norm_post <- pl_Q99_post - max(pl_Q99_post, na.rm = TRUE)
+
+
+# CI bounds to plot
+
+## Q90
+upper_Q90_post <- Q90_vals_post[pl_Q90_norm_post >= threshold]
+profile_CI_Q90_post <- c(lower = min(upper_Q90_post, na.rm = TRUE), 
+                         upper = max(upper_Q90_post, na.rm = TRUE))
+
+## Q95
+upper_Q95_post <- Q95_vals_post[pl_Q95_norm_post >= threshold]
+profile_CI_Q95_post <- c(lower = min(upper_Q95_post, na.rm = TRUE), 
+                         upper = max(upper_Q95_post, na.rm = TRUE))
+
+## Q99
+upper_Q99_post <- Q99_vals_post[pl_Q99_norm_post >= threshold]
+profile_CI_Q99_post <- c(lower = min(upper_Q99_post, na.rm = TRUE), 
+                         upper = max(upper_Q99_post, na.rm = TRUE))
+
+
+# PLOT
+par(mfrow = c(1, 3))
+
+## Q90
+plot(Q90_vals_post, pl_Q90_norm_post, type = "l",
+     xlab = expression(Q[0.90]),
+     ylab = "log-likelihood",
+     ylim = c(min(pl_Q90_norm_post, threshold - 0.5, na.rm = TRUE),
+              max(pl_Q90_norm_post, na.rm = TRUE) + 0.5),
+     panel.first = grid())
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# CI bounds
+if (!any(is.na(profile_CI_Q90_post))) {
+  abline(v = profile_CI_Q90_post, col = "red", lty = 2)
+}
+
+# MLE
+abline(v = est_Q90_post,col = "navyblue", lty = 1)
+
+# Wald
+abline(v = Wald_CI90_post, col = "purple", lty = 3)
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "navyblue", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+
+# Q95 (post-2018)
+plot(Q95_vals_post, pl_Q95_norm_post, type = "l",
+     xlab = expression(Q[0.95]),
+     ylab = "log-likelihood",
+     ylim = c(min(pl_Q95_norm_post, threshold - 0.5, na.rm = TRUE),
+              max(pl_Q95_norm_post, na.rm = TRUE) + 0.5),
+     panel.first = grid())
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# CI bounds
+if (!any(is.na(profile_CI_Q95_post))) {
+  abline(v = profile_CI_Q95_post, col = "red", lty = 2)
+}
+
+# MLE
+abline(v = est_Q95_post,col = "navyblue", lty = 1)
+
+# Wald
+abline(v = Wald_CI95_post, col = "purple", lty = 3)
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "navyblue", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+# Q99 (post-2018)
+plot(Q99_vals_post, pl_Q99_norm_post, type = "l",
+     xlab = expression(Q[0.99]),
+     ylab = "log-likelihood",
+     ylim = c(min(pl_Q99_norm_post, threshold - 0.5, na.rm = TRUE),
+              max(pl_Q99_norm_post, na.rm = TRUE) + 0.5),
+     panel.first = grid())
+
+# threshold
+abline(h = threshold, col = "red", lty = 2)
+
+# CI bounds
+if (!any(is.na(profile_CI_Q99_post))) {
+  abline(v = profile_CI_Q99_post, col = "red", lty = 2)
+}
+
+# MLE
+abline(v = est_Q99_post,col = "navyblue", lty = 1)
+
+# Wald
+abline(v = Wald_CI99_post, col = "purple", lty = 3)
+
+legend("topright", 
+       legend = c("Profile", "95%", "MLE", "Wald"),
+       col = c("black", "red", "navyblue", "purple"),
+       lty = c(1, 2, 1, 3),
+       cex = 0.6,
+       bty = "n",
+       inset = c(0.01, 0.01))
+
+par(mfrow = c(1, 1))
+```
+
+Similar conclusions can be drawn for the Post2018 dataset. For $Q_{0.9}$, the Wald interval is narrower, suggesting that the normal approximation may underestimate the uncertainty of the parameter. For $Q_{0.95}$, the Wald interval is slightly shifted to the left relative to the profile likelihood interval, and remains a similar width. This indicates similar levels of estimated uncertainty, but suggests mild asymmetry in the likelihood surrounding the maximum. For $Q_{0.99}$, a substantial difference between the two interval types is again observed, with the Wald interval noticeably wider than the profile likelihood interval. This suggests that the normal approximation leads to overestimated uncertainty, and asymmetry in the likelihood around the maximum.
+
+# STAN
+
+```{r}
+#| include: false
+#| label: stan_model
+
+library(cmdstanr)
+
+gumbel_mod <- cmdstan_model("gumbel.stan")
+
+# fixing data
+stan_pre <- list(x = pre2018[is.finite(pre2018)],
+                 N = sum(is.finite(pre2018))
+)
+```
+
+```{r}
+#| include: false
+
+# fitting 
+fit_pre <- gumbel_mod$sample(data = stan_pre, 
+                             iter_sampling = 5000,
+                             iter_warmup = 2000,
+                             chains = 4,
+                             seed = 123)
+print(fit_pre)
+
+```
+
+```{r}
+#| include: false
+
+# fixing data
+stan_post <- list(x = post2018[is.finite(post2018)],
+                 N = sum(is.finite(post2018))
+)
+
+# fitting
+fit_post <- gumbel_mod$sample(data = stan_post,
+                              iter_sampling = 5000,
+                              iter_warmup = 2000,
+                              chains = 4,
+                              seed = 123)
+print(fit_post)
+
+```
+
+Using Stan, we specify a Gumbel model with parameters $\mu$ and $\sigma$, with $\sigma$ constrained to be positive. Weakly informative priors are assigned to these parameters: a normal prior with mean 14 and variance 10 for $\mu$, and a lognormal prior with mean 0 and variance 1 for $\sigma$. These priors provide moderate regularisation while allowing the data to primarily inform the parameter estimates.
+
+Within the model, Stan samples from the posterior distribution by incrementing the $\texttt{target}$ log-density, which represents the log-posterior up to a constant. The model is fitted using four chains, each generating 5000 samples, with the first 2000 iterations discarded as burn-in (warm-up) to allow the chains to converge to the target distribution.
+
+After fitting the model, the $\texttt{print}$ function is used to summarise the posterior distributions, including the mean, median, standard deviation, and 90% credible intervals for $\mu$ and $\sigma$. The 90% credible interval represents the range containing 90% of the posterior draws. A summary of the resulting tables are shown below, for Pre2018 and Post2018 datasets.
+
+```{r}
+#| echo: false
+#| include: false
+par(mfrow = c(1, 2))
+
+samples_pre <- fit_pre$draws(format = "df")
+samples_post <- fit_post$draws(format = "df")
+```
+
+```{r}
+#| echo: false
+
+# PRE2018 summary table
+stan_table_pre <- data.frame(Parameter = c("mu", "sigma"),
+                             Mean = round(c(mean(samples_pre$mu), mean(samples_pre$sig)), 2),
+                             Median = round(c(median(samples_pre$mu), median(samples_pre$sig)), 2),
+                             SD = round(c(sd(samples_pre$mu), sd(samples_pre$sig)), 2),
+                             Lower = round(c(quantile(samples_pre$mu, 0.025), quantile(samples_pre$sig, 0.025)), 2),
+                             Upper = round(c(quantile(samples_pre$mu, 0.975), quantile(samples_pre$sig, 0.975)), 2)
+)
+
+kable(stan_table_pre,
+      col.names = c("Parameter", "Mean", "Median", "SD", "Lower 90%", "Upper 90%"),
+      caption = "Posterior Summary - Pre 2018")
+
+# POST2018 summary table
+stan_table_post <- data.frame(Parameter = c("mu", "sigma"),
+                             Mean = round(c(mean(samples_post$mu), mean(samples_post$sig)), 2),
+                             Median = round(c(median(samples_post$mu), median(samples_post$sig)), 2),
+                             SD = round(c(sd(samples_post$mu), sd(samples_post$sig)), 2),
+                             Lower = round(c(quantile(samples_post$mu, 0.025), quantile(samples_post$sig, 0.025)), 2),
+                             Upper = round(c(quantile(samples_post$mu, 0.975), quantile(samples_post$sig, 0.975)), 2)
+)
+
+kable(stan_table_post,
+      col.names = c("Parameter", "Mean", "Median", "SD", "Lower 90%", "Upper 90%"),
+      caption = "Posterior Summary - Post 2018")
+
+```
+
+All parameters in both tables show good convergence, since $\texttt{rhat}$ has all values equal to 1 and sufficiently large sample sizes.
+
+## Surfaces
+
+Instead of likelihood surfaces, we plot the Bayesian equivalent - the joint posterior distribution of $\mu$ and $\sigma$. These plots represent the plausible values of $\mu$ and $\sigma$ given the prior distributions and data. From the contour plots below, we can observe the most likely parameters (as the peak), see correlation between parameters, and the spread which reflects the uncertainty in the parameter estimates.
+
+```{r}
+#| echo: false
+#| fig.cap: "Posterior densities for Pre2018 (left) and Post2018 (right)"
+par(mfrow = c(1, 2))
+plot_pre <- kde2d(samples_pre$mu, samples_pre$sig, n = 100)
+contour(plot_pre, ylab = expression(sigma), xlab = expression(mu), main = "Pre2018")
+
+plot_post <- kde2d(samples_post$mu, samples_post$sig, n = 100)
+contour(plot_post, ylab = expression(sigma), xlab = expression(mu), main = "Post2018")
+
+```
+
+The posterior distributions for both datasets appear to be approximately normal, as indicated by the elliptical shape of the joint posterior contours. This means that the parameters are well-estimated, and that the normal approximations to the posterior distribution hold some validity. Since the spread of both is quite limited, there is limited uncertainty in the parameter estimates.
+
+## Credibility Intervals
+
+Credibility intervals are used to describe the range of parameter values most plausible, given the data and the posterior distributions. These, unlike Wald, do not assume normality approximations and instead derive credible intervals directly from the posterior samples of the model.
+
+```{r}
+#| include: false
+#| label: cred_pre
+
+# mu
+mu_95_pre <- quantile(samples_pre$mu, c(0.025, 0.975))
+
+# sigma
+sig_95_pre <- quantile(samples_pre$sig, c(0.025, 0.975))
+
+# quantile credibility intervals
+Q90_pre <- samples_pre$mu - samples_pre$sig*log(-log(0.90))
+mean(Q90_pre)
+
+Q95_pre <- samples_pre$mu - samples_pre$sig*log(-log(0.95))
+mean(Q95_pre)
+
+Q99_pre <- samples_pre$mu - samples_pre$sig*log(-log(0.99))
+mean(Q99_pre)
+
+```
+
+```{r}
+#| include: false
+#| label: cred_post
+
+# parameter credibility intervals
+mu_95_post <- quantile(samples_post$mu, c(0.025, 0.975))
+sig_95_post <- quantile(samples_post$sig, c(0.025, 0.975))
+
+# all quantile credibility intervals
+Q90_post <- samples_post$mu - samples_post$sig*log(-log(0.90))
+mean(Q90_post)
+
+Q95_post <- samples_post$mu - samples_post$sig*log(-log(0.95))
+mean(Q95_post)
+
+Q99_post <- samples_post$mu - samples_post$sig*log(-log(0.99))
+mean(Q99_post)
+```
+
+For the Pre2018 and Post2018 datasets, we plot the posterior distributions of the 90th, 95th and 99th quantiles. These distributions are obtained directly from the posterior samples generated by Stan. From these, we compute 90% credibility intervals using the 5th and 95th percentiles of hte posterior samples, thereby allowing us to visualise the uncertainty of each quantile estimate.
+
+### Pre2018
+
+```{r}
+#| echo: false
+#| fig-cap: "Posterior Distributions of Pre2018 quantiles"
+
+par(mfrow = c(1, 3))
+
+# Left Panel: Q90
+boundsQ90_pre <- quantile(Q90_pre, c(0.05, 0.95))
+hist(Q90_pre, breaks = 50, prob = TRUE, main = "Q90", xlab = "Q90")
+abline(v = mean(Q90_pre), col = "hotpink", lty = 2)
+abline(v = boundsQ90_pre, col = "red", lty = 2)
+
+# Middle Panel: Q95
+boundsQ95_pre <- quantile(Q95_pre, c(0.05, 0.95))
+hist(Q95_pre, breaks = 50, prob = TRUE, main = "Q95", xlab = "Q95")
+abline(v = mean(Q95_pre), col = "hotpink", lty = 2)
+abline(v = boundsQ95_pre, col = "red", lty = 2)
+
+# Right Panel: Q99
+boundsQ99_pre <- quantile(Q99_pre, c(0.05, 0.95))
+hist(Q99_pre, breaks = 50, prob = TRUE, main = "Q99", xlab = "Q99")
+abline(v = mean(Q99_pre), col = "hotpink", lty = 2)
+abline(v = boundsQ99_pre, col = "red", lty = 2)
+
+```
+
+### Post2018
+
+```{r}
+#| echo: false
+#| fig-cap: "Posterior Distributions of Post2018 quantiles"
+par(mfrow = c(1, 3))
+
+# Left Panel: Q90
+boundsQ90_post <- quantile(Q90_post, c(0.05, 0.95))
+hist(Q90_post, breaks = 50, prob = TRUE, main = "Q90", xlab = "Q90")
+abline(v = mean(Q90_post), col = "navyblue", lty = 2)
+abline(v = boundsQ90_post, col = "red", lty = 2)
+
+# Middle Panel: Q95
+boundsQ95_post <- quantile(Q95_post, c(0.05, 0.95))
+hist(Q95_post, breaks = 50, prob = TRUE, main = "Q95", xlab = "Q95")
+abline(v = mean(Q95_post), col = "navyblue", lty = 2)
+abline(v = boundsQ95_post, col = "red", lty = 2)
+
+# Right Panel: Q99
+boundsQ99_post <- quantile(Q99_post, c(0.05, 0.95))
+hist(Q99_post, breaks = 50, prob = TRUE, main = "Q99", xlab = "Q99")
+abline(v = mean(Q99_post), col = "navyblue", lty = 2)
+abline(v = boundsQ99_post, col = "red", lty = 2)
+
+```
+
+The posterior distributions are roughly symmetric, which suggests that they are approximately normal. This indicates that normal-based approximations, like Wald intervals, are reasonable in this case. For both datasets, the credibility intervals increase in width as the quantile level increases, meaning that there is greater uncertainty in estimating more extreme values. We can expect this, since higher quantiles tend to have fewer observations in the tail of the distribution. Despite the Gumbel distribution's design to model extreme values, the substantial uncertainty in these high quantile estimates reflects an inherent uncertainty surrounding extremes.
+
+Based on the Post2018 dataset, which accounts for the possible measurement tool shift, decision-makers at Cape Town Harbour should plan for potentially higher extreme wind speeds in future Decembers.
+
+# Likelihood vs Bayesian approach
+
+Through both likelihood and Bayesian approaches to model the maximum wind speeds, we observe that the parameter estimates are very similar across both methods. For the Pre2018 dataset, the likelihood approach yields $\mu = 5.63$ and $\sigma = 1.45$, while the Bayesian approach gives identical estimates. For Post2018, the likelihood estimates are $\mu = 26.30$ and $\sigma = 3.00$, compared to $\mu = 26.35$ and $\sigma = 3.03$ from the Bayesian model. This indicates that both approaches perform with comparable accuracy for this data.
+
+However, the Bayesian implementation using Stan offers several advantages. Stan is significantly easier to implement, avoiding the extensive manual computation required in the likelihood approach, which increases the potential for human error. The Bayesian method provides fuller posterior distributions, allowing direct measures of uncertainty and credible intervals without relying on approximations like the delta method. Stan offers additional diagnostic tools to determine reliability (like $\texttt{rhat}$), which are not available in the likelihood approach. The Bayesian method allows for the inclusion of prior knowledge, making them more flexible to different datasets.
+
+Overall, while both methods produced similar results in this case, Stan provides a more interpretable, efficient, and reliable approach for modeling wind speeds, especially for complex models or limited available data.
